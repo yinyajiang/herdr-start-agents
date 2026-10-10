@@ -1,0 +1,9 @@
+{
+  "agents": [
+    {"kind": "codex", "enabled": true, "args": []},
+    {"kind": "omp", "enabled": true, "args": []},
+    {"kind": "cursor", "enabled": true, "args": []},
+    {"kind": "kimi", "enabled": true, "args": []}
+  ],
+  "startup_timeout_seconds": 30
+}

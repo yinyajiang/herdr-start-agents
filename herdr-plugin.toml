@@ -1,0 +1,18 @@
+id = "herdr-start-agents"
+name = "Start Agents"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Start missing coding agents in the current workspace"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "start"
+title = "启动当前窗口缺失的 CLI"
+contexts = ["workspace"]
+command = ["python3", "main.py", "start"]
+
+[[actions]]
+id = "init-config"
+title = "生成 CLI 启动配置"
+contexts = ["workspace"]
+command = ["python3", "main.py", "init-config"]
