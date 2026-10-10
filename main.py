@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -295,6 +296,145 @@ def start_agent(herdr, entry, pane, reserved, timeout):
             return
 
 
+def layout_snapshot(herdr, base):
+    layout = herdr.call("pane", "layout", "--pane", base).get("layout")
+    if not isinstance(layout, dict) or not layout.get("tab_id"):
+        raise PluginError("无法读取当前 tab 布局")
+    panes = list_field(layout, "panes")
+    area = layout.get("area", {})
+    if not panes or not area.get("width") or not area.get("height"):
+        raise PluginError("当前 tab 布局尺寸不可用")
+    if any(not p.get("pane_id") or not isinstance(p.get("rect"), dict) for p in panes):
+        raise PluginError("pane 布局数据不完整")
+    return layout
+
+
+def grid_rows(count, width, height):
+    """Choose compact rows, weighting terminal cells as roughly twice as tall."""
+    square = math.isqrt(count)
+    if square * square == count:
+        return [square] * square
+    best = None
+    for rows in range(1, count + 1):
+        columns = math.ceil(count / rows)
+        # Favor a useful terminal shape; avoid mostly empty final rows.
+        aspect = width * rows / (2 * height * columns)
+        score = abs(math.log(aspect / 1.5)) + (rows * columns - count) / count
+        candidate = (score, rows)
+        if best is None or candidate < best:
+            best = candidate
+    rows = best[1]
+    quotient, remainder = divmod(count, rows)
+    return [quotient + (index < remainder) for index in range(rows)]
+
+
+def grid_rects(ids, rows, area):
+    """Ideal cell rectangles. Ragged rows get heights proportional to cell count."""
+    count = len(ids)
+    result = {}
+    offset = 0
+    y = area.get("y", 0)
+    for columns in rows:
+        height = area["height"] * columns / count
+        width = area["width"] / columns
+        for column, pane in enumerate(ids[offset:offset + columns]):
+            result[pane] = {"x": area.get("x", 0) + column * width,
+                            "y": y, "width": width, "height": height}
+        offset += columns
+        y += height
+    return result
+
+
+def moved_pane(result, expected):
+    move = result.get("move_result", {})
+    pane = move.get("pane", {})
+    # All moves remain inside one workspace, preserving public pane IDs and PTYs.
+    if not move.get("changed") or pane.get("pane_id") != expected or not pane.get("tab_id"):
+        raise PluginError(f"无法确认 {expected} 已移动，停止布局调整")
+    return pane
+
+
+def move_to(herdr, pane, tab, target, direction, ratio=0.5):
+    result = herdr.call("pane", "move", pane, "--tab", tab, "--target-pane", target,
+                        "--split", direction, "--ratio", f"{ratio:.6f}", "--no-focus")
+    return moved_pane(result, pane)
+
+
+def arrange_grid(herdr, base):
+    layout = layout_snapshot(herdr, base)
+    if layout.get("zoomed"):
+        herdr.call("pane", "zoom", base, "--off")
+        layout = layout_snapshot(herdr, base)
+    panes = sorted(layout["panes"], key=lambda p: (p["rect"].get("y", 0), p["rect"].get("x", 0)))
+    # Keep the invoking pane in place while staging the others. No explicit focus
+    # commands are issued, so another client's active tab is not selected.
+    ids = [base] + [p["pane_id"] for p in panes if p["pane_id"] != base]
+    if len(ids) != len(panes):
+        raise PluginError("调用者 pane 不在当前布局中")
+    rows = grid_rows(len(ids), layout["area"]["width"], layout["area"]["height"])
+    expected = grid_rects(ids, rows, layout["area"])
+    if all(all(abs(p["rect"].get(key, -1000) - expected[p["pane_id"]][key]) <= 2
+               for key in ("x", "y", "width", "height")) for p in panes):
+        return
+    tab = layout["tab_id"]
+    staging = None
+    try:
+        first = ids[1]
+        pane = moved_pane(herdr.call("pane", "move", first, "--new-tab",
+                                    "--label", "start-agents-layout", "--no-focus"), first)
+        staging = pane["tab_id"]
+        for other in ids[2:]:
+            move_to(herdr, other, staging, first, "down")
+        # Build row anchors, then equal-width columns inside each row. The final
+        # move automatically removes the now-empty staging tab in Herdr.
+        anchors = [base]
+        offset = rows[0]
+        remaining = len(ids)
+        for previous_count, columns in zip(rows, rows[1:]):
+            anchor = ids[offset]
+            move_to(herdr, anchor, tab, anchors[-1], "down", previous_count / remaining)
+            remaining -= previous_count
+            anchors.append(anchor)
+            offset += columns
+        offset = 0
+        for columns, anchor in zip(rows, anchors):
+            previous = anchor
+            for index in range(1, columns):
+                pane = ids[offset + index]
+                move_to(herdr, pane, tab, previous, "right", 1 / (columns - index + 1))
+                previous = pane
+            offset += columns
+        print(f"布局已调整: {len(ids)} 个 pane，{len(rows)} 行，最多 {max(rows)} 列")
+    except PluginError:
+        # Recover only panes in the temporary tab owned by this action. Never
+        # close or restart an existing terminal when a layout operation fails.
+        if staging:
+            try:
+                live = list_field(herdr.call("pane", "list", "--workspace", layout["workspace_id"]), "panes")
+                for pane in live:
+                    if pane.get("tab_id") == staging:
+                        move_to(herdr, pane["pane_id"], tab, base, "right")
+            except PluginError as recovery:
+                print(f"部分 pane 保留在临时 tab {staging}: {recovery}", file=sys.stderr)
+        raise
+
+
+def split_for_agent(herdr, base, cwd):
+    layout = layout_snapshot(herdr, base)
+    if layout.get("zoomed"):
+        herdr.call("pane", "zoom", base, "--off")
+        layout = layout_snapshot(herdr, base)
+    target = max(layout["panes"], key=lambda p: p["rect"].get("width", 0) * p["rect"].get("height", 0))
+    rect = target["rect"]
+    direction = "right" if rect.get("width", 0) >= 2 * rect.get("height", 0) else "down"
+    result = herdr.call("pane", "split", target["pane_id"], "--direction", direction,
+                        "--ratio", "0.5", "--cwd", cwd, "--no-focus")
+    pane = result.get("pane", {}).get("pane_id")
+    if not pane:
+        raise PluginError("pane split 未返回新 pane_id，停止创建")
+    return pane
+
+
 def launch(env):
     workspace, base, context = invocation(env)
     with workspace_lock(env, workspace) as acquired:
@@ -304,7 +444,8 @@ def launch(env):
         agents, timeout = load_config(env)
         enabled = [entry for entry in agents if entry["enabled"]]
         if not enabled:
-            print("配置中没有启用的 CLI，无需启动")
+            arrange_grid(Herdr(env), base)
+            print("配置中没有启用的 CLI，已检查当前 tab 布局")
             return 0
         herdr = Herdr(env)
         panes, found, reserved = scan(herdr, workspace, enabled)
@@ -321,31 +462,28 @@ def launch(env):
             else:
                 missing.append(entry)
         if not missing:
+            arrange_grid(herdr, base)
             print("已启用的 CLI 均在当前窗口运行，无需启动")
             return 0
         cwd = (caller.get("foreground_cwd") or caller.get("cwd")
                or context.get("focused_pane_cwd") or context.get("workspace_cwd"))
         if not cwd or not Path(cwd).is_dir():
             raise PluginError(f"当前 pane 工作目录不可用: {cwd!r}")
-        # Build the right column first, with equal-height rows in config order.
         created = []
-        previous = base
         failed = False
         try:
-            for index, entry in enumerate(missing):
-                arguments = ["pane", "split", previous, "--direction",
-                             "right" if index == 0 else "down", "--cwd", cwd, "--no-focus"]
-                if index:
-                    arguments += ["--ratio", f"{1 / (len(missing) - index + 1):.6f}"]
-                pane = herdr.call(*arguments).get("pane", {}).get("pane_id")
-                if not pane:
-                    raise PluginError("pane split 未返回新 pane_id，停止创建")
-                previous = pane
+            for entry in missing:
+                pane = split_for_agent(herdr, base, cwd)
                 created.append((entry, pane))
                 herdr.call("pane", "rename", pane, entry["kind"])
         except PluginError as error:
             # Even if later splitting fails, launch the panes already created.
             print(f"布局未完全创建: {error}", file=sys.stderr)
+            failed = True
+        try:
+            arrange_grid(herdr, base)
+        except PluginError as error:
+            print(f"网格布局调整失败: {error}", file=sys.stderr)
             failed = True
         for entry, pane in created:
             try:

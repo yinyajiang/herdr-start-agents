@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import main
+from layout_model import LayoutModel, rects
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,8 @@ class FakeAPI:
         self.agents = agents or []
         self.errors = errors or {}
         self.calls = []
-        self.next_pane = 10
+        self.state = {"panes": panes, "processes": processes, "next_pane": 10}
+        self.layout = LayoutModel(self.state)
 
     def call(self, *args, timeout=10):
         self.calls.append(args)
@@ -39,11 +41,7 @@ class FakeAPI:
             return {"agents": self.agents}
         if args[:2] == ("pane", "process-info"):
             return {"process_info": self.processes[args[3]]}
-        if args[:2] == ("pane", "split"):
-            pane = {"pane_id": f"w1:p{self.next_pane}"}
-            self.next_pane += 1
-            return {"pane": pane}
-        return {}
+        return self.layout.call(list(args))
 
 
 class PluginTests(unittest.TestCase):
@@ -73,8 +71,8 @@ class PluginTests(unittest.TestCase):
         fake = FakeAPI(self.panes, self.processes)
         self.assertEqual(self.run_launch(fake), 0)
         splits = [c for c in fake.calls if c[:2] == ("pane", "split")]
-        self.assertEqual([c[4] for c in splits], ["right", "down", "down", "down"])
-        self.assertEqual([float(c[-1]) for c in splits[1:]], [0.25, 0.333333, 0.5])
+        self.assertEqual([c[4] for c in splits], ["right", "down", "down", "right"])
+        self.assertTrue(all(c[c.index("--ratio") + 1] == "0.5" for c in splits))
         self.assertTrue(all("--no-focus" in c and str(self.directory) in c for c in splits))
         starts = [c for c in fake.calls if c[:2] == ("agent", "start")]
         self.assertEqual([c[4] for c in starts], ["codex", "omp", "cursor", "kimi"])
@@ -84,6 +82,74 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(starts[3][-2:], ("--", "--auto"))
         self.assertEqual([c[3] for c in fake.calls if c[:2] == ("pane", "rename")],
                          ["codex", "omp", "cursor", "kimi"])
+        self.assertEqual(len(fake.state["trees"]), 1)
+        areas = [p["rect"]["width"] * p["rect"]["height"] for p in
+                 rects(fake.state["trees"]["w1:t1"], fake.state["area"])]
+        self.assertLess(max(areas) - min(areas), 0.05)
+
+    def test_four_existing_agents_become_two_rows_two_columns_without_restart(self):
+        self.processes["w1:p1"] = {"foreground_processes": [{"pid": 101, "name": "codex"}]}
+        for index, kind in enumerate(("omp", "cursor", "kimi"), 2):
+            pane = f"w1:p{index}"
+            self.panes.append({"pane_id": pane, "workspace_id": "w1", "tab_id": "w1:t1"})
+            self.processes[pane] = {"foreground_processes": [{"pid": 100 + index, "name": kind}]}
+        before = json.dumps(self.processes, sort_keys=True)
+        fake = FakeAPI(self.panes, self.processes)
+        self.assertEqual(self.run_launch(fake), 0)
+        result = rects(fake.state["trees"]["w1:t1"], fake.state["area"])
+        self.assertEqual({p["rect"]["x"] for p in result}, {0, 90})
+        self.assertEqual({p["rect"]["y"] for p in result}, {0, 30})
+        self.assertTrue(all(p["rect"]["width"] == 90 and p["rect"]["height"] == 30 for p in result))
+        self.assertEqual(json.dumps(self.processes, sort_keys=True), before)
+        self.assertFalse(any(c[:2] in (("agent", "start"), ("pane", "split"), ("pane", "close")) for c in fake.calls))
+        self.assertTrue(all("--no-focus" in c for c in fake.calls if c[:2] == ("pane", "move")))
+        moves = len([c for c in fake.calls if c[:2] == ("pane", "move")])
+        self.assertEqual(self.run_launch(fake), 0)
+        self.assertEqual(len([c for c in fake.calls if c[:2] == ("pane", "move")]), moves)
+
+    def test_grid_uses_window_shape_and_equal_area_for_ragged_rows(self):
+        self.assertEqual(main.grid_rows(4, 240, 60), [2, 2])
+        self.assertEqual(main.grid_rows(2, 240, 60), [2])
+        self.assertEqual(main.grid_rows(2, 60, 120), [1, 1])
+        for count in range(1, 17):
+            rows = main.grid_rows(count, 180, 60)
+            self.assertEqual(sum(rows), count)
+            expected = main.grid_rects(list(range(count)), rows, {"width": 180, "height": 60})
+            areas = [p["width"] * p["height"] for p in expected.values()]
+            self.assertAlmostEqual(max(areas), min(areas))
+
+    def test_disabling_all_launches_still_arranges_existing_panes(self):
+        self.config({"agents": []})
+        for index in range(2, 5):
+            self.panes.append({"pane_id": f"w1:p{index}", "workspace_id": "w1", "tab_id": "w1:t1"})
+        fake = FakeAPI(self.panes, self.processes)
+        self.assertEqual(self.run_launch(fake), 0)
+        result = rects(fake.state["trees"]["w1:t1"], fake.state["area"])
+        self.assertEqual({p["rect"]["x"] for p in result}, {0, 90})
+        self.assertEqual({p["rect"]["y"] for p in result}, {0, 30})
+        self.assertFalse(any(c[:2] == ("agent", "start") for c in fake.calls))
+
+    def test_layout_failure_recovers_existing_processes(self):
+        self.config({"agents": [{"kind": "codex"}]})
+        self.processes["w1:p1"]["foreground_processes"] = [{"name": "codex", "pid": 101}]
+        for index in range(2, 5):
+            pane = f"w1:p{index}"
+            self.panes.append({"pane_id": pane, "workspace_id": "w1", "tab_id": "w1:t1"})
+            self.processes[pane] = {"foreground_processes": [{"name": "bash", "pid": index}]}
+        count = 0
+
+        def fail_once(args):
+            nonlocal count
+            count += 1
+            return main.PluginError("move failure") if count == 3 else None
+
+        before = json.dumps(self.processes, sort_keys=True)
+        fake = FakeAPI(self.panes, self.processes, errors={("pane", "move"): fail_once})
+        with self.assertRaises(main.PluginError):
+            self.run_launch(fake)
+        self.assertEqual({p["tab_id"] for p in fake.panes}, {"w1:t1"})
+        self.assertEqual(len(fake.state["trees"]), 1)
+        self.assertEqual(json.dumps(self.processes, sort_keys=True), before)
 
     def test_only_missing_enabled_cli_and_native_arguments(self):
         self.config({"agents": [{"kind": "codex", "enabled": False},

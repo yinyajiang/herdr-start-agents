@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import sys
+from layout_model import LayoutModel
 
 
 path = Path(os.environ["FAKE_HERDR_STATE"])
 state = json.loads(path.read_text())
+layout = LayoutModel(state)
 args = sys.argv[1:]
 state["calls"].append(args)
 result = {}
@@ -25,15 +27,8 @@ elif args[:2] == ["pane", "rename"]:
     for pane in state["panes"]:
         if pane["pane_id"] == args[2]:
             pane["label"] = args[3]
-elif args[:2] == ["pane", "split"]:
-    source = next(p for p in state["panes"] if p["pane_id"] == args[2])
-    pane_id = f"{source['workspace_id']}:p{state['next_pane']}"
-    state["next_pane"] += 1
-    pane = {"pane_id": pane_id, "workspace_id": source["workspace_id"],
-            "tab_id": source["tab_id"], "cwd": args[args.index("--cwd") + 1]}
-    state["panes"].append(pane)
-    state["processes"][pane_id] = {"shell_pid": 1, "foreground_processes": [{"pid": 1, "name": "bash"}]}
-    result = {"pane": pane}
+elif args[:2] in (["pane", "split"], ["pane", "layout"], ["pane", "move"]):
+    result = layout.call(args)
 elif args[:2] == ["agent", "start"]:
     name = args[2]
     kind = args[args.index("--kind") + 1]
