@@ -78,6 +78,10 @@ class PluginTests(unittest.TestCase):
         self.assertTrue(all("--no-focus" in c and str(self.directory) in c for c in splits))
         starts = [c for c in fake.calls if c[:2] == ("agent", "start")]
         self.assertEqual([c[4] for c in starts], ["codex", "omp", "cursor", "kimi"])
+        self.assertEqual(starts[0][-2:], ("--", "--dangerously-bypass-approvals-and-sandbox"))
+        self.assertNotIn("--", starts[1])
+        self.assertEqual(starts[2][-2:], ("--", "--force"))
+        self.assertEqual(starts[3][-2:], ("--", "--auto"))
         self.assertEqual([c[3] for c in fake.calls if c[:2] == ("pane", "rename")],
                          ["codex", "omp", "cursor", "kimi"])
 
@@ -230,6 +234,7 @@ class PluginTests(unittest.TestCase):
         for process, expected in [
             ({"name": "node", "argv": ["node", "/opt/codex/bin/codex.js"]}, "codex"),
             ({"name": "unknown", "argv0": "/opt/cursor-agent"}, "cursor-agent"),
+            ({"name": "unknown", "argv0": "/opt/agent"}, "agent"),
             ({"name": "python3", "cmdline": "python3 '/a path/kimi'"}, "kimi"),
             ({"name": "C:\\bin\\CODEX.EXE"}, "codex"),
         ]:

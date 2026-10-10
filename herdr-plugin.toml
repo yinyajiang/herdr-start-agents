@@ -1,6 +1,6 @@
 id = "herdr-start-agents"
 name = "Start Agents"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.0"
 description = "Start missing coding agents in the current workspace"
 platforms = ["linux", "macos"]

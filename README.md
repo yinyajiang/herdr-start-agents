@@ -27,7 +27,7 @@ herdr plugin action invoke herdr-start-agents.start
 每次调用会：
 
 1. 读取配置，扫描**当前 workspace 的所有 tab / pane**。这里的“窗口”与参考脚本一致，指 workspace；其他 workspace 中的同类 CLI 不会阻止当前窗口启动。
-2. 根据前台进程、进程入口和 Herdr 的待启动状态判断 CLI 是否存在。支持 `cursor-agent`、`kimi-code`，以及 Node / Python 的 CLI 入口。仅有 `codex` 等 pane 标题、历史输出或命令参数不算已启动。
+2. 根据前台进程、进程入口和 Herdr 的待启动状态判断 CLI 是否存在。支持 `cursor-agent` / `agent`、`kimi-code`，以及 Node / Python 的 CLI 入口。仅有 `codex` 等 pane 标题、历史输出或命令参数不算已启动。
 3. 跳过当前窗口已有的 CLI，将识别到的 pane 重命名为对应 `kind`。
 4. 按配置顺序为缺失的 CLI 创建 pane：当前 pane 右侧建立一列，再向下分为等高区域。所有新 pane 继承调用者 pane 的工作目录，保持原焦点。
 5. 将新 pane 重命名为 `codex`、`omp`、`cursor`、`kimi` 等，通过 Herdr 的 `agent start` 启动。注册的 agent 名若与其他窗口冲突，使用 `codex-2` 等后缀；pane 名始终是 CLI 类型名。
@@ -50,14 +50,18 @@ herdr plugin config-dir herdr-start-agents
 ```json
 {
   "agents": [
-    {"kind": "codex", "enabled": true, "args": []},
+    {"kind": "codex", "enabled": true, "args": ["--dangerously-bypass-approvals-and-sandbox"]},
     {"kind": "omp", "enabled": true, "args": []},
-    {"kind": "cursor", "enabled": true, "args": []},
-    {"kind": "kimi", "enabled": false, "args": []}
+    {"kind": "cursor", "enabled": true, "args": ["--force"]},
+    {"kind": "kimi", "enabled": true, "args": ["--auto"]}
   ],
   "startup_timeout_seconds": 30
 }
 ```
+
+默认启动参数为 `codex --dangerously-bypass-approvals-and-sandbox`、`kimi --auto`、Cursor `agent --force`（Herdr 使用等价入口 `cursor-agent --force`）。OMP 不追加参数。这些参数分别启用各 CLI 的自动执行 / 跳过确认模式，可通过 `args` 调整。
+
+默认值仅用于新建配置，不覆盖已有用户配置；已经安装的用户需要在自己的 `config.json` 中更新对应 `args`。
 
 - `enabled`：是否补齐该 CLI，默认 `true`。设为 `false` 不会关闭已经运行的 CLI。
 - `agents` 数组顺序：新 pane 自上而下的顺序。也可以删掉不需要的条目；空数组不启动任何 CLI。

@@ -19,15 +19,18 @@ import time
 PLUGIN_ID = "herdr-start-agents"
 DEFAULT_CONFIG = {
     "agents": [
-        {"kind": kind, "enabled": True, "args": []}
-        for kind in ("codex", "omp", "cursor", "kimi")
+        {"kind": "codex", "enabled": True,
+         "args": ["--dangerously-bypass-approvals-and-sandbox"]},
+        {"kind": "omp", "enabled": True, "args": []},
+        {"kind": "cursor", "enabled": True, "args": ["--force"]},
+        {"kind": "kimi", "enabled": True, "args": ["--auto"]},
     ],
     "startup_timeout_seconds": 30,
 }
 ALIASES = {
     "codex": ("codex",),
     "omp": ("omp",),
-    "cursor": ("cursor", "cursor-agent"),
+    "cursor": ("cursor", "cursor-agent", "agent"),
     "kimi": ("kimi", "kimi-code"),
 }
 INTERPRETERS = {"node", "nodejs", "bun", "python", "python3", "deno"}
